@@ -1,63 +1,79 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Depends
 import pandas as pd
+from database import SessionLocal, engine
+from models import Book
+from schemas import BookCreate
+from stats import calculate_stats
+from database import Base
+from sqlalchemy.orm import Session
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# Allow frontend access
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Dependencies
+def get_db():
+    db = SessionLocal()
 
-# Load CSV
-df = pd.read_csv("goodreads_library_export.csv")
+    try:
+        yield db
+    finally:
+        db.close()
 
-# Clean numeric columns
-df["Year Published"] = pd.to_numeric(df["Year Published"], errors="coerce")
-df["Average Rating"] = pd.to_numeric(df["Average Rating"], errors="coerce")
-df["Number of Pages"] = pd.to_numeric(df["Number of Pages"], errors="coerce")
+# Load books as dataframe
+def get_df(db: any):
 
-@app.get("/")
-def home():
-    return {"status": "Backend running"}
+    books = db.query(Book).all()
+    data = []
+    for b in books:
+        data.append({
+            "title": b.title,
+            "author": b.author,
+            "year": b.year,
+            "rating": b.rating,
+            "shelf": b.shelf
+        })
 
-@app.get("/summary")
-def summary():
-    
-    return {
-        "total_books": len(df),
-        "read books": len(df[df["Exclusive Shelf"]=="read"]),
-        "avg_rating": round(df["Average Rating"].mean(),2),
-        "avg_pages": int(df["Number of Pages"].mean())
-    }
+    return pd.DataFrame(data)
 
-@app.get("/books_per_year")
-def books_per_year():
-    
-    data = (
-        df.groupby("Year Published")
-        .size()
-        .reset_index(name="count")
-        .dropna()        
+# Cover fetch
+def get_cover(title: str):
+
+    return f"https://covers.openlibrary.org/b/title/{title}L.jpg"
+
+# Add new book
+
+
+@app.post("/books")
+def add_book(book: BookCreate, db: Session = Depends(get_db)):
+
+    cover = get_cover(book.title)
+
+    new_book = Book(
+        title=book.title,
+        author=book.author,
+        year=book.year,
+        pages=book.pages,
+        rating=book.rating,
+        shelf=book.shelf,
+        cover_url=cover
     )
-    
-    return data.to_dict(orient="records")
 
-@app.get("/top_authors")
-def top_authors():
-    
-    data = (
-        df["Author"]
-        .value_counts()
-        .head(10)
-        .reset_index()
-    )
-    
-    data.columns=["author","count"]
-    
-    return data.to_dict(orient="records")
+    db.add(new_book)
+    db.commit()
 
+    return {"status": "added"}
+
+# Get books
+@app.get("/books")
+def get_books(db: Session = Depends(get_db)):
+    
+    return db.query(Book).all()
+
+# Statistics endpoint
+@app.get("/stats")
+def stats(db: Session = Depends(get_db)):
+    
+    df = get_df(db)
+    
+    return calculate_stats(df)
